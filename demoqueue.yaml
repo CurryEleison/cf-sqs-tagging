@@ -1,0 +1,22 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Demo stack to show tagging of SQS queues
+Resources:
+  MyQueueTest:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: TaggingQueue
+      DelaySeconds: 0
+      MaximumMessageSize: 262144
+      MessageRetentionPeriod: 345600
+  MyQueueTags:
+    Type: Custom::SQSTags
+    DependsOn:
+    - MyQueueTest
+    Properties:
+      ServiceToken: !ImportValue sqstagging:SqsTaggerLambdaArn
+      QueueUrl: !Ref MyQueueTest
+      Tags:
+        FirstTag: Itsavalue2
+        SecondTag: Alsoavalue
+

@@ -1,0 +1,117 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Lamdba to back SQS queue tagging in Cloudformation custom resource
+Resources:
+  SqsTaggerLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+  SqsTaggerLambdaPermissions:
+    Type: AWS::IAM::Policy
+    DependsOn: 
+    - SqsTaggerLambdaRole
+    Properties:
+      PolicyName: SqsTaggingReadWrite
+      Roles:
+      - !Ref SqsTaggerLambdaRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Action:
+          - logs:CreateLogGroup
+          - logs:CreateLogStream
+          - logs:PutLogEvents
+          Resource: arn:aws:logs:*:*:*
+        - Effect: Allow
+          Action:
+          - sqs:GetQueueAttributes
+          - sqs:ListQueues
+          - sqs:ListQueueTags
+          - sqs:TagQueue
+          - sqs:UnTagQueue
+          Resource: arn:aws:sqs:*:*:*
+  SqsQueueLambda:
+    Type: AWS::Lambda::Function
+    DependsOn: SqsTaggerLambdaPermissions
+    Properties:
+      Description: CloudFormation helper to set tags on an SQS queue
+      Handler: index.lambda_handler
+      MemorySize: 128
+      Role: !GetAtt SqsTaggerLambdaRole.Arn
+      Runtime: python3.6
+      Code:
+        ZipFile: |
+          import sys
+          import json
+          import boto3
+          import cfnresponse
+
+          current_session = boto3.session.Session()
+          current_region = current_session.region_name
+          client = boto3.client('sqs', region_name=current_region)
+          def lambda_handler(event, context):
+            try:
+              # print(json.dumps(event))
+              responseData = {}
+              if (event['RequestType'] == 'Create' or event['RequestType'] == 'Update'):
+                if not is_configured(event):
+                  responseData['FailReason'] = "QueueUrl missing from configuration"
+                  cfnresponse.send(event, context, cfnresponse.FAILED, responseData)
+                  return
+                queueurl = event['ResourceProperties']['QueueUrl']
+                tags = event['ResourceProperties']['Tags']
+                if event['RequestType'] == 'Update':
+                  if 'QueueUrl' in event['OldResourceProperties'] and queueurl != event['OldResourceProperties']['QueueUrl']:
+                    settags(event['OldResourceProperties']['QueueUrl'], {}, False)
+                settags(queueurl, tags)
+                cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData, get_physicalid(event))
+              elif event['RequestType'] == 'Delete':
+                if is_configured(event):
+                  settags(event['ResourceProperties']['QueueUrl'], {})
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData, get_physicalid(event))
+                else:
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)
+              else:
+                responseData['FailReason'] = "Did not find an action to execute"
+                cfnresponse.send(event, context, cfnresponse.FAILED, responseData, get_physicalid(event))
+            except:
+              faildata = {}
+              faildata['FailReason'] = 'Exception: {0!s}'.format(sys.exc_info()[0])
+              cfnresponse.send(event, context, cfnresponse.FAILED, faildata, get_physicalid(event))
+          def settags(queueurl, tags, raiseonempty = True):
+            listresponse = client.list_queue_tags(QueueUrl=queueurl)
+            beforetags = listresponse['Tags'] if 'Tags' in listresponse else {}
+            # Calculate deltas. 
+            removetagslist = [x for x in beforetags.keys() if x not in tags.keys()]
+            upserttagsdict = {k: v for (k, v) in tags.items() if k not in beforetags.keys() or v != beforetags[k]}
+            # Remove extra tags
+            if len(removetagslist) > 0:
+              client.untag_queue(QueueUrl = queueurl, TagKeys = removetagslist)
+            # Upsert tags that need to be set
+            if len(upserttagsdict.keys()) > 0:
+              client.tag_queue(QueueUrl = queueurl, Tags = upserttagsdict)
+
+            return
+          def get_physicalid(event):
+            try:
+              return '{0}:tags'.format(event['ResourceProperties']['QueueUrl'])
+            except:
+              return None
+          def is_configured(event):
+            return 'ResourceProperties' in event and 'QueueUrl' in event['ResourceProperties']
+Outputs:
+  SqsTaggerLambdaArn:
+    Description: Lambda to back custom resources to tag and untag SQS queues
+    Value: !GetAtt SqsQueueLambda.Arn
+    Export: 
+      Name: sqstagging:SqsTaggerLambdaArn
